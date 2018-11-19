@@ -3,23 +3,26 @@ import argparse
 import time
 import math
 import os
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.onnx
 
 import data
-import model
+# import model
+from transformer_model2 import make_model
 
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='./data/wikitext-2',
                     help='location of the data corpus')
 parser.add_argument('--model', type=str, default='LSTM',
                     help='type of recurrent net (RNN_TANH, RNN_RELU, LSTM, GRU)')
-parser.add_argument('--emsize', type=int, default=200,
+parser.add_argument('--hidden_size', type=int, default=200,
                     help='size of word embeddings')
 parser.add_argument('--nhid', type=int, default=200,
                     help='number of hidden units per layer')
-parser.add_argument('--nlayers', type=int, default=2,
+parser.add_argument('--n_layers', type=int, default=64,
                     help='number of layers')
 parser.add_argument('--lr', type=float, default=20,
                     help='initial learning rate')
@@ -61,7 +64,7 @@ device = torch.device("cuda" if args.cuda else "cpu")
 
 corpus = data.Corpus(args.data)
 
-# Starting from sequential data, batchify arranges the dataset into columns.
+# Starting from sequential data, batchify arranges the dataset into rows.
 # For instance, with the alphabet as the sequence and batch size 4, we'd get
 # ┌ a g m s ┐
 # │ b h n t │
@@ -69,20 +72,28 @@ corpus = data.Corpus(args.data)
 # │ d j p v │
 # │ e k q w │
 # └ f l r x ┘.
+# ┌ a b c d ┐
+# | e f g h |
+# | i j k l |
+# | m n o p |
+# | q r s t |
+# └ u v w x ┘.
 # These columns are treated as independent by the model, which means that the
 # dependence of e. g. 'g' on 'f' can not be learned, but allows more efficient
 # batch processing.
 
-def batchify(data, bsz):
-    # Work out how cleanly we can divide the dataset into bsz parts.
-    nbatch = data.size(0) // bsz
+def batchify(data, batch_size):
+    # Work out how cleanly we can divide the dataset into batch_size parts.
+    nbatch = data.size(0) // batch_size
     # Trim off any extra elements that wouldn't cleanly fit (remainders).
-    data = data.narrow(0, 0, nbatch * bsz)
+    data = data.narrow(0, 0, nbatch * batch_size)
     # Evenly divide the data across the bsz batches.
-    data = data.view(bsz, -1).t().contiguous()
+    data = data.view(batch_size, -1).t().contiguous()
     return data.to(device)
 
+
 eval_batch_size = 10
+pad = 100000
 train_data = batchify(corpus.train, args.batch_size)
 val_data = batchify(corpus.valid, eval_batch_size)
 test_data = batchify(corpus.test, eval_batch_size)
@@ -91,8 +102,10 @@ test_data = batchify(corpus.test, eval_batch_size)
 # Build the model
 ###############################################################################
 
-ntokens = len(corpus.dictionary)
-model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
+n_tokens = len(corpus.dictionary)
+model = make_model(n_tokens, n_tokens, hidden_size=args.hidden_size, n_layers=args.n_layers,
+                   dropout=args.dropout, tied=args.tied).to(device)
+# model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
 
 criterion = nn.CrossEntropyLoss()
 
@@ -100,13 +113,18 @@ criterion = nn.CrossEntropyLoss()
 # Training code
 ###############################################################################
 
-def repackage_hidden(h):
-    """Wraps hidden states in new Tensors, to detach them from their history."""
-    if isinstance(h, torch.Tensor):
-        return h.detach()
-    else:
-        return tuple(repackage_hidden(v) for v in h)
+# mask subsequent entries
+def subsequent_mask(size):
+    "Mask out subsequent positions."
+    attn_shape = (1, size, size)
+    subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
+    return torch.from_numpy(subsequent_mask) == 0
 
+def make_std_mask(tgt):
+    "Create a mask to hide padding and future words."
+    tgt_mask = (tgt != pad).unsqueeze(-2)
+    tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(tgt_mask)
+    return tgt_mask
 
 # get_batch subdivides the source data into chunks of length args.bptt.
 # If source is equal to the example output of the batchify function, with
@@ -122,7 +140,10 @@ def get_batch(source, i):
     seq_len = min(args.bptt, len(source) - 1 - i)
     data = source[i:i+seq_len]
     target = source[i+1:i+1+seq_len].view(-1)
-    return data, target
+    data_mask = (data != pad).unsqueeze(-2)
+    target_mask = make_std_mask(target.long())
+
+    return data, target, data_mask, target_mask
 
 
 def evaluate(data_source):
@@ -137,7 +158,6 @@ def evaluate(data_source):
             output, hidden = model(data, hidden)
             output_flat = output.view(-1, ntokens)
             total_loss += len(data) * criterion(output_flat, targets).item()
-            hidden = repackage_hidden(hidden)
     return total_loss / (len(data_source) - 1)
 
 
@@ -147,14 +167,10 @@ def train():
     total_loss = 0.
     start_time = time.time()
     ntokens = len(corpus.dictionary)
-    hidden = model.init_hidden(args.batch_size)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
         data, targets = get_batch(train_data, i)
-        # Starting each batch, we detach the hidden state from how it was previously produced.
-        # If we didn't, the model would try backpropagating all the way to start of the dataset.
-        hidden = repackage_hidden(hidden)
         model.zero_grad()
-        output, hidden = model(data, hidden)
+        output = model(data)
         loss = criterion(output.view(-1, ntokens), targets)
         loss.backward()
 
