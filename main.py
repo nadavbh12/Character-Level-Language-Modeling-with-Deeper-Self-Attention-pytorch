@@ -64,7 +64,7 @@ device = torch.device("cuda" if args.cuda else "cpu")
 
 corpus = data.Corpus(args.data)
 
-# Starting from sequential data, batchify arranges the dataset into rows.
+# Starting from sequential data, batchify arranges the dataset into columns.
 # For instance, with the alphabet as the sequence and batch size 4, we'd get
 # ┌ a g m s ┐
 # │ b h n t │
@@ -72,12 +72,6 @@ corpus = data.Corpus(args.data)
 # │ d j p v │
 # │ e k q w │
 # └ f l r x ┘.
-# ┌ a b c d ┐
-# | e f g h |
-# | i j k l |
-# | m n o p |
-# | q r s t |
-# └ u v w x ┘.
 # These columns are treated as independent by the model, which means that the
 # dependence of e. g. 'g' on 'f' can not be learned, but allows more efficient
 # batch processing.
@@ -87,7 +81,7 @@ def batchify(data, batch_size):
     nbatch = data.size(0) // batch_size
     # Trim off any extra elements that wouldn't cleanly fit (remainders).
     data = data.narrow(0, 0, nbatch * batch_size)
-    # Evenly divide the data across the bsz batches.
+    # Evenly divide the data across the batch_size batches.
     data = data.view(batch_size, -1).t().contiguous()
     return data.to(device)
 
@@ -138,8 +132,8 @@ def make_std_mask(tgt):
 
 def get_batch(source, i):
     seq_len = min(args.bptt, len(source) - 1 - i)
-    data = source[i:i+seq_len]
-    target = source[i+1:i+1+seq_len].view(-1)
+    data = source[i:i+seq_len].t()
+    target = source[i+1:i+1+seq_len].t()
     data_mask = (data != pad).unsqueeze(-2)
     target_mask = make_std_mask(target.long())
 
@@ -168,10 +162,10 @@ def train():
     start_time = time.time()
     ntokens = len(corpus.dictionary)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
-        data, targets = get_batch(train_data, i)
+        data, target, data_mask, target_mask = get_batch(train_data, i)
         model.zero_grad()
-        output = model(data)
-        loss = criterion(output.view(-1, ntokens), targets)
+        output = model(data, target_mask)
+        loss = criterion(output.view(-1, ntokens).contiguous(), target.contiguous().view(-1))
         loss.backward()
 
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
