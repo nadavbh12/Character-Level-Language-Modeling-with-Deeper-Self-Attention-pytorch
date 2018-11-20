@@ -7,11 +7,12 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import torch.onnx
 
 import data
 # import model
-from transformer_model2 import make_model
+from transformer_model2 import next_char_transformer
 
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='./data/wikitext-2',
@@ -24,17 +25,19 @@ parser.add_argument('--nhid', type=int, default=200,
                     help='number of hidden units per layer')
 parser.add_argument('--n_layers', type=int, default=64,
                     help='number of layers')
-parser.add_argument('--lr', type=float, default=20,
+parser.add_argument('--lr', type=float, default=0.003,
                     help='initial learning rate')
+parser.add_argument('--momentum', type=float, default=0.99,
+                    help='momentum for SGD')
 parser.add_argument('--clip', type=float, default=0.25,
                     help='gradient clipping')
 parser.add_argument('--epochs', type=int, default=40,
                     help='upper epoch limit')
-parser.add_argument('--batch_size', type=int, default=20, metavar='N',
+parser.add_argument('--batch_size', type=int, default=16, metavar='N',
                     help='batch size')
 parser.add_argument('--bptt', type=int, default=35,
                     help='sequence length')
-parser.add_argument('--dropout', type=float, default=0.2,
+parser.add_argument('--dropout', type=float, default=0.55,
                     help='dropout applied to layers (0 = no dropout)')
 parser.add_argument('--tied', action='store_true',
                     help='tie the word embedding and softmax weights')
@@ -63,6 +66,7 @@ device = torch.device("cuda" if args.cuda else "cpu")
 ###############################################################################
 
 corpus = data.Corpus(args.data)
+
 
 # Starting from sequential data, batchify arranges the dataset into columns.
 # For instance, with the alphabet as the sequence and batch size 4, we'd get
@@ -96,12 +100,10 @@ test_data = batchify(corpus.test, eval_batch_size)
 # Build the model
 ###############################################################################
 
-n_tokens = len(corpus.dictionary)
-model = make_model(n_tokens, n_tokens, hidden_size=args.hidden_size, n_layers=args.n_layers,
-                   dropout=args.dropout, tied=args.tied).to(device)
-# model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
+vocab_size = len(corpus.dictionary)
+model = next_char_transformer(vocab_size, hidden_size=args.hidden_size, n_layers=args.n_layers,
+                              dropout=args.dropout, tied=args.tied).to(device)
 
-criterion = nn.CrossEntropyLoss()
 
 ###############################################################################
 # Training code
@@ -114,11 +116,13 @@ def subsequent_mask(size):
     subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
     return torch.from_numpy(subsequent_mask) == 0
 
+
 def make_std_mask(tgt):
     "Create a mask to hide padding and future words."
     tgt_mask = (tgt != pad).unsqueeze(-2)
     tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(tgt_mask)
     return tgt_mask
+
 
 # get_batch subdivides the source data into chunks of length args.bptt.
 # If source is equal to the example output of the batchify function, with
@@ -132,8 +136,8 @@ def make_std_mask(tgt):
 
 def get_batch(source, i):
     seq_len = min(args.bptt, len(source) - 1 - i)
-    data = source[i:i+seq_len].t()
-    target = source[i+1:i+1+seq_len].t()
+    data = source[i:i + seq_len].t()
+    target = source[i + 1:i + 1 + seq_len].t()
     data_mask = (data != pad).unsqueeze(-2)
     target_mask = make_std_mask(target.long())
 
@@ -145,13 +149,11 @@ def evaluate(data_source):
     model.eval()
     total_loss = 0.
     ntokens = len(corpus.dictionary)
-    hidden = model.init_hidden(eval_batch_size)
     with torch.no_grad():
         for i in range(0, data_source.size(0) - 1, args.bptt):
-            data, targets = get_batch(data_source, i)
-            output, hidden = model(data, hidden)
-            output_flat = output.view(-1, ntokens)
-            total_loss += len(data) * criterion(output_flat, targets).item()
+            data, target, data_mask, target_mask = get_batch(data_source, i)
+            output = model(data, target_mask)
+            total_loss += len(data) * model.criterion(output, target.contiguous().view(-1)).item()
     return total_loss / (len(data_source) - 1)
 
 
@@ -165,23 +167,19 @@ def train():
         data, target, data_mask, target_mask = get_batch(train_data, i)
         model.zero_grad()
         output = model(data, target_mask)
-        loss = criterion(output.view(-1, ntokens).contiguous(), target.contiguous().view(-1))
+        loss = model.criterion(output, target.contiguous().view(-1))
         loss.backward()
-
-        # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-        for p in model.parameters():
-            p.data.add_(-lr, p.grad.data)
+        optimizer.step()
 
         total_loss += loss.item()
 
         if batch % args.log_interval == 0 and batch > 0:
             cur_loss = total_loss / args.log_interval
             elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
-                    'loss {:5.2f} | ppl {:8.2f}'.format(
-                epoch, batch, len(train_data) // args.bptt, lr,
-                elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
+            print('| epoch {:3d} | {:5d}/{:5d} batches | ms/batch {:5.2f} | '
+                  'loss {:5.2f} | ppl {:8.2f}'.format(
+                epoch, batch, len(train_data) // args.bptt,
+                              elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
 
@@ -196,28 +194,25 @@ def export_onnx(path, batch_size, seq_len):
 
 
 # Loop over epochs.
-lr = args.lr
 best_val_loss = None
+optimizer = optim.SGD(model.parameters(), args.lr, args.momentum)
 
 # At any point you can hit Ctrl + C to break out of training early.
 try:
-    for epoch in range(1, args.epochs+1):
+    for epoch in range(1, args.epochs + 1):
         epoch_start_time = time.time()
         train()
         val_loss = evaluate(val_data)
         print('-' * 89)
         print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-                'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                           val_loss, math.exp(val_loss)))
+              'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+                                         val_loss, math.exp(val_loss)))
         print('-' * 89)
         # Save the model if the validation loss is the best we've seen so far.
         if not best_val_loss or val_loss < best_val_loss:
             with open(args.save, 'wb') as f:
                 torch.save(model, f)
             best_val_loss = val_loss
-        else:
-            # Anneal the learning rate if no improvement has been seen in the validation dataset.
-            lr /= 4.0
 except KeyboardInterrupt:
     print('-' * 89)
     print('Exiting from training early')
