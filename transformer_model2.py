@@ -13,7 +13,7 @@ class EncoderLayer(nn.Module):
     """Encoder is made up of self-attn and feed forward (defined below)"""
 
     def __init__(self, size, self_attn, feed_forward, dropout,
-                 intermediate_layer_losses=True, generator=None, max_sequence_len=35):
+                 intermediate_layer_losses=True, generator=None, max_sequence_len=512):
         super(EncoderLayer, self).__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
@@ -75,7 +75,7 @@ class NextCharTransformer(nn.Module):
     """
     def __init__(self, vocab_size, n_layers=64,
                  hidden_size=512, inner_linear=2048,
-                 n_heads=8, dropout=0.55, tied=True, max_sequence_len=35,
+                 n_heads=8, dropout=0.55, tied=True, max_sequence_len=512,
                  intermediate_layer_losses=True):
         super(NextCharTransformer, self).__init__()
 
@@ -121,15 +121,14 @@ class NextCharTransformer(nn.Module):
         """Stop using losses from intermediate layer as function of time in training.
            See section 2.1 - Intermediate Layer Losses
         """
-
-        for i, layer in enumerate(self.encoder.layers):
+        for i, layer in enumerate(self.encoder.layers[:-1]):
             if training_percent > (i // (2 * self.n_layers)):
                 layer.intermediate_layer_losses = False
 
 
 def next_char_transformer(src_vocab, n_layers=64, hidden_size=512,
                           inner_linear=2048, n_heads=8, dropout=0.55,
-                          tied=True, max_sequence_len=35, intermediate_losses=True):
+                          tied=True, max_sequence_len=512, intermediate_losses=True):
     return NextCharTransformer(src_vocab,
                                n_layers, hidden_size,
                                inner_linear, n_heads,
