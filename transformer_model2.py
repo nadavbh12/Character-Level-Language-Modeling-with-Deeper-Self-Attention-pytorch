@@ -13,17 +13,20 @@ class EncoderLayer(nn.Module):
     """Encoder is made up of self-attn and feed forward (defined below)"""
 
     def __init__(self, size, self_attn, feed_forward, dropout,
-                 intermediate_layer_losses=True, generator=None):
+                 intermediate_layer_losses=True, generator=None, max_sequence_len=35):
         super(EncoderLayer, self).__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
         self.sublayer = clones(SublayerConnection(size, dropout), 2)
+        self.add_positional_encoding = AddPositionalEncoding(size, max_sequence_len)
+
         self.size = size
         self.intermediate_layer_losses = intermediate_layer_losses
         if intermediate_layer_losses and self.training:
             self.classifier = copy.deepcopy(generator)
 
     def forward(self, x, mask):
+        x = self.add_positional_encoding(x)
         x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, mask))
         x = self.sublayer[1](x, self.feed_forward)
         if self.intermediate_layer_losses and self.training:
@@ -60,8 +63,9 @@ class MultiLayerCrossEntropy(nn.Module):
         total_loss = torch.zeros(1, dtype=inputs[0].dtype, device=inputs[0].device)
         for input in inputs:
             if input is not None:
-                total_loss += self.cross_entropy(input.view(-1, self.vocab_size).contiguous(), target)
-        return total_loss
+                loss = self.cross_entropy(input.view(-1, self.vocab_size).contiguous(), target)
+                total_loss += loss
+        return total_loss, loss
 
 
 class NextCharTransformer(nn.Module):
@@ -71,7 +75,7 @@ class NextCharTransformer(nn.Module):
     """
     def __init__(self, vocab_size, n_layers=64,
                  hidden_size=512, inner_linear=2048,
-                 n_heads=8, dropout=0.55, tied=True,
+                 n_heads=8, dropout=0.55, tied=True, max_sequence_len=35,
                  intermediate_layer_losses=True):
         super(NextCharTransformer, self).__init__()
 
@@ -81,7 +85,8 @@ class NextCharTransformer(nn.Module):
 
         self.generator = Generator(hidden_size, vocab_size)
         self.encoder = Encoder(EncoderLayer(hidden_size, copy.deepcopy(attn), copy.deepcopy(ff),
-                                            dropout, intermediate_layer_losses, self.generator),
+                                            dropout, intermediate_layer_losses, self.generator,
+                                            max_sequence_len),
                                n_layers)
         self.embed = nn.Sequential(Embeddings(hidden_size, vocab_size), copy.deepcopy(position))
 
@@ -100,6 +105,7 @@ class NextCharTransformer(nn.Module):
 
         self.vocab_size = vocab_size
         self.intermediate_layer_losses = intermediate_layer_losses
+        self.n_layers = n_layers
 
     def forward(self, src, mask):
         """Take in and process masked src and target sequences."""
@@ -111,10 +117,20 @@ class NextCharTransformer(nn.Module):
             prediction = self.generator(emb)
             return [prediction]
 
+    def update(self, training_percent):
+        """Stop using losses from intermediate layer as function of time in training.
+           See section 2.1 - Intermediate Layer Losses
+        """
+
+        for i, layer in enumerate(self.encoder.layers):
+            if training_percent > (i // (2 * self.n_layers)):
+                layer.intermediate_layer_losses = False
+
 
 def next_char_transformer(src_vocab, n_layers=64, hidden_size=512,
-                          inner_linear=2048, n_heads=8, dropout=0.55, tied=True):
+                          inner_linear=2048, n_heads=8, dropout=0.55,
+                          tied=True, max_sequence_len=35, intermediate_losses=True):
     return NextCharTransformer(src_vocab,
                                n_layers, hidden_size,
                                inner_linear, n_heads,
-                               dropout, tied)
+                               dropout, tied, max_sequence_len, intermediate_losses)

@@ -151,3 +151,15 @@ class PositionalEncoding(nn.Module):
         x = x + Variable(self.pe[:, :x.size(1)],
                          requires_grad=False)
         return self.dropout(x)
+
+
+class AddPositionalEncoding(nn.Module):
+    def __init__(self, hidden_size, max_sequence_length):
+        super(AddPositionalEncoding, self).__init__()
+        self.hidden_size = hidden_size
+        self.max_sequence_length = max_sequence_length
+        self.positional_encoding = nn.Parameter(torch.empty(max_sequence_length, hidden_size))
+        nn.init.normal_(self.positional_encoding)
+
+    def forward(self, x):
+        return x + self.positional_encoding

@@ -65,7 +65,18 @@ device = torch.device("cuda" if args.cuda else "cpu")
 # Load data
 ###############################################################################
 
-corpus = data.Corpus(args.data)
+# corpus = data.Corpus(args.data)
+
+import os
+import hashlib
+fn = 'corpus.{}.data'.format(hashlib.md5(args.data.encode()).hexdigest())
+if os.path.exists(fn):
+    print('Loading cached dataset...')
+    corpus = torch.load(fn)
+else:
+    print('Producing dataset...')
+    corpus = data.Corpus(args.data)
+    torch.save(corpus, fn)
 
 
 # Starting from sequential data, batchify arranges the dataset into columns.
@@ -91,10 +102,11 @@ def batchify(data, batch_size):
 
 
 eval_batch_size = 10
+test_batch_size = 1
 pad = 100000
 train_data = batchify(corpus.train, args.batch_size)
 val_data = batchify(corpus.valid, eval_batch_size)
-test_data = batchify(corpus.test, eval_batch_size)
+test_data = batchify(corpus.test, test_batch_size)
 
 ###############################################################################
 # Build the model
@@ -102,7 +114,7 @@ test_data = batchify(corpus.test, eval_batch_size)
 
 vocab_size = len(corpus.dictionary)
 model = next_char_transformer(vocab_size, hidden_size=args.hidden_size, n_layers=args.n_layers,
-                              dropout=args.dropout, tied=args.tied).to(device)
+                              dropout=args.dropout, tied=args.tied, max_sequence_len=35).to(device)
 
 
 ###############################################################################
@@ -167,19 +179,20 @@ def train():
         data, target, data_mask, target_mask = get_batch(train_data, i)
         model.zero_grad()
         output = model(data, target_mask)
-        loss = model.criterion(output, target.contiguous().view(-1))
+        loss, last_loss = model.criterion(output, target.contiguous().view(-1))
         loss.backward()
         optimizer.step()
 
-        total_loss += loss.item()
+        total_loss += last_loss.item()
 
         if batch % args.log_interval == 0 and batch > 0:
             cur_loss = total_loss / args.log_interval
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | ms/batch {:5.2f} | '
-                  'loss {:5.2f} | ppl {:8.2f}'.format(
+                  'loss {:5.2f} | ppl {:8.2f} | bpc {:8.3f}'.format(
                 epoch, batch, len(train_data) // args.bptt,
-                              elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
+                elapsed * 1000 / args.log_interval, cur_loss,
+                math.exp(cur_loss), cur_loss / math.log(2)))
             total_loss = 0
             start_time = time.time()
 
@@ -205,14 +218,15 @@ try:
         val_loss = evaluate(val_data)
         print('-' * 89)
         print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-              'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                         val_loss, math.exp(val_loss)))
+              'valid ppl {:8.2f} | valid bpc {:8.3f}'.format(epoch, (time.time() - epoch_start_time),
+                                         val_loss, math.exp(val_loss), val_loss / math.log(2)))
         print('-' * 89)
         # Save the model if the validation loss is the best we've seen so far.
         if not best_val_loss or val_loss < best_val_loss:
             with open(args.save, 'wb') as f:
                 torch.save(model, f)
             best_val_loss = val_loss
+        model.update(epoch // args.epoch)
 except KeyboardInterrupt:
     print('-' * 89)
     print('Exiting from training early')
@@ -220,9 +234,6 @@ except KeyboardInterrupt:
 # Load the best saved model.
 with open(args.save, 'rb') as f:
     model = torch.load(f)
-    # after load the rnn params are not a continuous chunk of memory
-    # this makes them a continuous chunk, and will speed up forward pass
-    model.rnn.flatten_parameters()
 
 # Run on test data.
 test_loss = evaluate(test_data)
