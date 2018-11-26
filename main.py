@@ -29,7 +29,7 @@ parser.add_argument('--momentum', type=float, default=0.99,
                     help='momentum for SGD')
 parser.add_argument('--clip', type=float, default=0.25,
                     help='gradient clipping')
-parser.add_argument('--epochs', type=int, default=40,
+parser.add_argument('--epochs', type=int, default=250,
                     help='upper epoch limit')
 parser.add_argument('--batch_size', type=int, default=16, metavar='N',
                     help='batch size')
@@ -62,6 +62,25 @@ device = torch.device("cuda" if args.cuda else "cpu")
 ###############################################################################
 # Load data
 ###############################################################################
+
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
 
 # corpus = data.Corpus(args.data)
 
@@ -99,7 +118,7 @@ def batchify(data, batch_size):
     return data.to(device)
 
 
-eval_batch_size = 10
+eval_batch_size = 16
 test_batch_size = 1
 pad = 100000
 train_data = batchify(corpus.train, args.batch_size)
@@ -121,14 +140,14 @@ model = next_char_transformer(vocab_size, hidden_size=args.hidden_size, n_layers
 
 # mask subsequent entries
 def subsequent_mask(size):
-    "Mask out subsequent positions."
+    """Mask out subsequent positions."""
     attn_shape = (1, size, size)
     subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
     return torch.from_numpy(subsequent_mask) == 0
 
 
 def make_std_mask(tgt):
-    "Create a mask to hide padding and future words."
+    """Create a mask to hide padding and future words."""
     tgt_mask = (tgt != pad).unsqueeze(-2)
     tgt_mask = tgt_mask & subsequent_mask(tgt.size(-1)).type_as(tgt_mask)
     return tgt_mask
@@ -144,27 +163,47 @@ def make_std_mask(tgt):
 # by the batchify function. The chunks are along dimension 0, corresponding
 # to the seq_len dimension in the LSTM.
 
-def get_batch(source, i):
-    seq_len = min(args.bptt, len(source) - 1 - i)
+def get_batch(source, i, train):
+    if train:
+        i = torch.randint(low=0, high=(len(source) - args.bptt), size=(1,)).long().item()
+        seq_len = args.bptt
+        target = source[i + 1:i + 1 + seq_len].t()
+    else:
+        seq_len = min(args.bptt, len(source) - 1 - i)
+        target = source[i + 1 + seq_len, :]
+
     data = source[i:i + seq_len].t()
-    target = source[i + 1:i + 1 + seq_len].t()
+
     data_mask = (data != pad).unsqueeze(-2)
-    target_mask = make_std_mask(target.long())
+    if train:
+        target_mask = make_std_mask(target.long())
+    else:
+        target_mask = None
+        # target_mask = torch.ones(target.shape[1], dtype=target.dtype, device=target.device)
+
+    # reshape target to match what cross_entropy expects
+    target = target.contiguous().view(-1)
 
     return data, target, data_mask, target_mask
 
 
 def evaluate(data_source):
     # Turn on evaluation mode which disables dropout.
+    total_loss = AverageMeter()
     model.eval()
-    total_loss = 0.
+    # total_loss = 0.
     ntokens = len(corpus.dictionary)
+    step = 500
     with torch.no_grad():
-        for i in range(0, data_source.size(0) - 1, args.bptt):
-            data, target, data_mask, target_mask = get_batch(data_source, i)
+        i = 0
+        for i in range(0, data_source.size(0) - 1 - args.bptt, step):
+            data, target, data_mask, target_mask = get_batch(data_source, i, train=False)
             output = model(data, target_mask)
-            total_loss += len(data) * model.criterion(output, target.contiguous().view(-1)).item()
-    return total_loss / (len(data_source) - 1)
+            _, last_loss = model.criterion(output, target)
+            # total_loss += len(data) * last_loss.item()
+            total_loss.update(last_loss.item(), len(data))
+    return total_loss.avg
+    # return total_loss / (len(data_source) // step)
 
 
 def train():
@@ -174,10 +213,10 @@ def train():
     start_time = time.time()
     ntokens = len(corpus.dictionary)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
-        data, target, data_mask, target_mask = get_batch(train_data, i)
+        data, target, data_mask, target_mask = get_batch(train_data, i, train=True)
         model.zero_grad()
         output = model(data, target_mask)
-        loss, last_loss = model.criterion(output, target.contiguous().view(-1))
+        loss, last_loss = model.criterion(output, target)
         loss.backward()
         optimizer.step()
 
@@ -193,6 +232,10 @@ def train():
                 math.exp(cur_loss), cur_loss / math.log(2)))
             total_loss = 0
             start_time = time.time()
+
+        if batch % 1000 == 0 and batch > 0:
+        # if batch % 10000 == 0 and batch > 0:
+            break
 
 
 def export_onnx(path, batch_size, seq_len):
@@ -224,7 +267,7 @@ try:
             with open(args.save, 'wb') as f:
                 torch.save(model, f)
             best_val_loss = val_loss
-        model.update(epoch // args.epoch)
+        model.update(epoch // args.epochs)
 except KeyboardInterrupt:
     print('-' * 89)
     print('Exiting from training early')

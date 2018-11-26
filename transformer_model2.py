@@ -13,7 +13,7 @@ class EncoderLayer(nn.Module):
     """Encoder is made up of self-attn and feed forward (defined below)"""
 
     def __init__(self, size, self_attn, feed_forward, dropout,
-                 intermediate_layer_losses=True, generator=None, max_sequence_len=512):
+                 intermediate_layer_predictions=True, generator=None, max_sequence_len=512):
         super(EncoderLayer, self).__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
@@ -21,15 +21,15 @@ class EncoderLayer(nn.Module):
         self.add_positional_encoding = AddPositionalEncoding(size, max_sequence_len)
 
         self.size = size
-        self.intermediate_layer_losses = intermediate_layer_losses
-        if intermediate_layer_losses and self.training:
+        self.intermediate_layer_predictions = intermediate_layer_predictions
+        if intermediate_layer_predictions and self.training:
             self.classifier = copy.deepcopy(generator)
 
     def forward(self, x, mask):
         x = self.add_positional_encoding(x)
         x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, mask))
         x = self.sublayer[1](x, self.feed_forward)
-        if self.intermediate_layer_losses and self.training:
+        if self.intermediate_layer_predictions and self.training:
             return x, self.classifier(x)
         else:
             return x, None
@@ -38,11 +38,11 @@ class EncoderLayer(nn.Module):
 class Encoder(nn.Module):
     """Core encoder is a stack of N layers"""
 
-    def __init__(self, layer, n_layers, intermediate_layer_losses=True):
+    def __init__(self, layer, n_layers, intermediate_layer_predictions=True):
         super(Encoder, self).__init__()
         self.layers = clones(layer, n_layers)
         self.norm = LayerNorm(layer.size)
-        self.intermediate_layer_losses = intermediate_layer_losses
+        self.intermediate_layer_predictions = intermediate_layer_predictions
 
     def forward(self, x, mask):
         """Pass the input (and mask) through each layer in turn."""
@@ -63,7 +63,11 @@ class MultiLayerCrossEntropy(nn.Module):
         total_loss = torch.zeros(1, dtype=inputs[0].dtype, device=inputs[0].device)
         for input in inputs:
             if input is not None:
-                loss = self.cross_entropy(input.view(-1, self.vocab_size).contiguous(), target)
+                if self.training:
+                    loss = self.cross_entropy(input.view(-1, self.vocab_size).contiguous(), target)
+                else:
+                    # in evaluation consider only the last prediction
+                    loss = self.cross_entropy(input[:, -1, :].contiguous(), target)
                 total_loss += loss
         return total_loss, loss
 
@@ -76,7 +80,7 @@ class NextCharTransformer(nn.Module):
     def __init__(self, vocab_size, n_layers=64,
                  hidden_size=512, inner_linear=2048,
                  n_heads=8, dropout=0.55, tied=True, max_sequence_len=512,
-                 intermediate_layer_losses=True):
+                 intermediate_layer_predictions=True):
         super(NextCharTransformer, self).__init__()
 
         attn = MultiHeadedAttention(n_heads, hidden_size)
@@ -85,7 +89,7 @@ class NextCharTransformer(nn.Module):
 
         self.generator = Generator(hidden_size, vocab_size)
         self.encoder = Encoder(EncoderLayer(hidden_size, copy.deepcopy(attn), copy.deepcopy(ff),
-                                            dropout, intermediate_layer_losses, self.generator,
+                                            dropout, intermediate_layer_predictions, self.generator,
                                             max_sequence_len),
                                n_layers)
         self.embed = nn.Sequential(Embeddings(hidden_size, vocab_size), copy.deepcopy(position))
@@ -104,14 +108,14 @@ class NextCharTransformer(nn.Module):
                 nn.init.xavier_uniform_(p)
 
         self.vocab_size = vocab_size
-        self.intermediate_layer_losses = intermediate_layer_losses
+        self.intermediate_layer_predictions = intermediate_layer_predictions
         self.n_layers = n_layers
 
     def forward(self, src, mask):
         """Take in and process masked src and target sequences."""
         src_emb = self.embed(src)
         emb, intermediate_predictions = self.encoder(src_emb, mask)
-        if self.intermediate_layer_losses and self.training:
+        if self.intermediate_layer_predictions and self.training:
             return intermediate_predictions
         else:
             prediction = self.generator(emb)
