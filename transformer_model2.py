@@ -85,17 +85,15 @@ class NextCharTransformer(nn.Module):
 
         attn = MultiHeadedAttention(n_heads, hidden_size)
         ff = PositionwiseFeedForward(hidden_size, inner_linear, dropout)
-        position = PositionalEncoding(hidden_size, dropout)
 
         self.generator = Generator(hidden_size, vocab_size)
         self.encoder = Encoder(EncoderLayer(hidden_size, copy.deepcopy(attn), copy.deepcopy(ff),
                                             dropout, intermediate_layer_predictions, self.generator,
                                             max_sequence_len),
                                n_layers)
-        self.embed = nn.Sequential(Embeddings(hidden_size, vocab_size), copy.deepcopy(position))
+        self.embed = Embeddings(hidden_size, vocab_size)
 
         self.criterion = MultiLayerCrossEntropy(vocab_size)
-        # self.criterion = nn.CrossEntropyLoss()
 
         # use weight sharing
         if tied:
