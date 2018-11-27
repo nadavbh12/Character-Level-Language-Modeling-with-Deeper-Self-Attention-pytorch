@@ -193,7 +193,7 @@ def evaluate(data_source):
     model.eval()
     # total_loss = 0.
     ntokens = len(corpus.dictionary)
-    step = 500
+    step = 256
     with torch.no_grad():
         i = 0
         for i in range(0, data_source.size(0) - 1 - args.bptt, step):
@@ -233,8 +233,8 @@ def train():
             total_loss = 0
             start_time = time.time()
 
-        if batch % 1000 == 0 and batch > 0:
-        # if batch % 10000 == 0 and batch > 0:
+        # if batch % 1000 == 0 and batch > 0:
+        if batch % 10000 == 0 and batch > 0:
             break
 
 
