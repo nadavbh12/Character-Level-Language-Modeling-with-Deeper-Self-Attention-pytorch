@@ -19,6 +19,7 @@ class EncoderLayer(nn.Module):
         self.feed_forward = feed_forward
         self.sublayer = clones(SublayerConnection(size, dropout), 2)
         self.add_positional_encoding = AddPositionalEncoding(size, max_sequence_len)
+        self.norm = self.sublayer[0].norm
 
         self.size = size
         self.intermediate_layer_predictions = intermediate_layer_predictions
@@ -30,7 +31,7 @@ class EncoderLayer(nn.Module):
         x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, mask))
         x = self.sublayer[1](x, self.feed_forward)
         if self.intermediate_layer_predictions and self.training:
-            return x, self.classifier(x)
+            return x, self.classifier(self.norm(x))
         else:
             return x, None
 
@@ -101,9 +102,9 @@ class NextCharTransformer(nn.Module):
 
         # This was important from their code.
         # Initialize parameters with Glorot / fan_avg.
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
+        # for p in self.parameters():
+        #     if p.dim() > 1:
+        #         nn.init.xavier_uniform_(p)
 
         self.vocab_size = vocab_size
         self.intermediate_layer_predictions = intermediate_layer_predictions
