@@ -1,5 +1,5 @@
 # Character-Level-Language-Modeling-with-Deeper-Self-Attention-pytorch
-Reproducing Character-Level-Language-Modeling with Deeper Self-Attention in PyTorch
+Reproducing [Character-Level-Language-Modeling with Deeper Self-Attention](https://arxiv.org/pdf/1808.04444.pdf) in PyTorch
 
 ## TODO:
 - [ ] Implement multiple targets.
