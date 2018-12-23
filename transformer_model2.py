@@ -1,11 +1,3 @@
-import copy
-
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
-
 from modules.annotated_attention import *
 
 
@@ -60,17 +52,23 @@ class MultiLayerCrossEntropy(nn.Module):
         self.cross_entropy = nn.CrossEntropyLoss(*args, **kwargs)
         self.vocab_size = vocab_size
 
-    def forward(self, inputs, target):
-        total_loss = torch.zeros(1, dtype=inputs[0].dtype, device=inputs[0].device)
-        for input in inputs:
-            if input is not None:
+    def forward(self, layer_outputs, target):
+        total_loss = torch.zeros(1, dtype=layer_outputs[0].dtype, device=layer_outputs[0].device)
+        n_layers_with_loss = 0
+        for layer_output in layer_outputs:
+            if layer_output is not None:
+                # if True:
                 if self.training:
-                    loss = self.cross_entropy(input.view(-1, self.vocab_size).contiguous(), target)
+                    loss = self.cross_entropy(layer_output.view(-1, self.vocab_size).contiguous(), target)
                 else:
                     # in evaluation consider only the last prediction
-                    loss = self.cross_entropy(input[:, -1, :].contiguous(), target)
+                    loss = self.cross_entropy(layer_output[:, -1, :].contiguous(), target)
                 total_loss += loss
-        return total_loss, loss
+                n_layers_with_loss += 1
+
+        average_loss_of_all_layers = total_loss / n_layers_with_loss
+        final_layer_loss = loss
+        return average_loss_of_all_layers, final_layer_loss
 
 
 class NextCharTransformer(nn.Module):
@@ -84,14 +82,14 @@ class NextCharTransformer(nn.Module):
                  intermediate_layer_predictions=True):
         super(NextCharTransformer, self).__init__()
 
-        attn = MultiHeadedAttention(n_heads, hidden_size)
+        attn = MultiHeadedAttention(n_heads, hidden_size, dropout)
         ff = PositionwiseFeedForward(hidden_size, inner_linear, dropout)
 
         self.generator = Generator(hidden_size, vocab_size)
         self.encoder = Encoder(EncoderLayer(hidden_size, copy.deepcopy(attn), copy.deepcopy(ff),
                                             dropout, intermediate_layer_predictions, self.generator,
                                             max_sequence_len),
-                               n_layers)
+                               n_layers, intermediate_layer_predictions)
         self.embed = Embeddings(hidden_size, vocab_size)
 
         self.criterion = MultiLayerCrossEntropy(vocab_size)
@@ -126,7 +124,7 @@ class NextCharTransformer(nn.Module):
         """
         for i, layer in enumerate(self.encoder.layers[:-1]):
             if training_percent > (i // (2 * self.n_layers)):
-                layer.intermediate_layer_losses = False
+                layer.intermediate_layer_predictions = False
 
 
 def next_char_transformer(src_vocab, n_layers=64, hidden_size=512,

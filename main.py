@@ -11,7 +11,6 @@ import torch.optim as optim
 import torch.onnx
 
 import data
-# import model
 from transformer_model2 import next_char_transformer
 
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM Language Model')
@@ -118,7 +117,7 @@ def batchify(data, batch_size):
     return data.to(device)
 
 
-eval_batch_size = 16
+eval_batch_size = args.batch_size
 test_batch_size = 1
 pad = 100000
 train_data = batchify(corpus.train, args.batch_size)
@@ -131,7 +130,8 @@ test_data = batchify(corpus.test, test_batch_size)
 
 vocab_size = len(corpus.dictionary)
 model = next_char_transformer(vocab_size, hidden_size=args.hidden_size, n_layers=args.n_layers,
-                              dropout=args.dropout, tied=args.tied, max_sequence_len=args.bptt).to(device)
+                              dropout=args.dropout, tied=args.tied, max_sequence_len=args.bptt,
+                              intermediate_losses=True).to(device)
 
 
 ###############################################################################
@@ -170,16 +170,12 @@ def get_batch(source, i, train):
         target = source[i + 1:i + 1 + seq_len].t()
     else:
         seq_len = min(args.bptt, len(source) - 1 - i)
-        target = source[i + 1 + seq_len, :]
+        target = source[i + seq_len, :]
 
     data = source[i:i + seq_len].t()
 
     data_mask = (data != pad).unsqueeze(-2)
-    if train:
-        target_mask = make_std_mask(target.long())
-    else:
-        target_mask = None
-        # target_mask = torch.ones(target.shape[1], dtype=target.dtype, device=target.device)
+    target_mask = make_std_mask(data.long())
 
     # reshape target to match what cross_entropy expects
     target = target.contiguous().view(-1)
@@ -191,25 +187,21 @@ def evaluate(data_source):
     # Turn on evaluation mode which disables dropout.
     total_loss = AverageMeter()
     model.eval()
-    # total_loss = 0.
     ntokens = len(corpus.dictionary)
-    step = 256
+    step = 1
     with torch.no_grad():
-        i = 0
-        for i in range(0, data_source.size(0) - 1 - args.bptt, step):
+        for batch, i in enumerate(range(0, data_source.size(0) - 1 - args.bptt, step)):
             data, target, data_mask, target_mask = get_batch(data_source, i, train=False)
             output = model(data, target_mask)
             _, last_loss = model.criterion(output, target)
-            # total_loss += len(data) * last_loss.item()
-            total_loss.update(last_loss.item(), len(data))
+            total_loss.update(last_loss.item(), 1)
     return total_loss.avg
-    # return total_loss / (len(data_source) // step)
 
 
 def train():
     # Turn on training mode which enables dropout.
     model.train()
-    total_loss = 0.
+    total_loss = AverageMeter()
     start_time = time.time()
     ntokens = len(corpus.dictionary)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
@@ -220,32 +212,42 @@ def train():
         loss.backward()
         optimizer.step()
 
-        total_loss += last_loss.item()
+        total_loss.update(last_loss.item(), data.size(0))
 
         if batch % args.log_interval == 0 and batch > 0:
-            cur_loss = total_loss / args.log_interval
+            cur_loss = total_loss.avg
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | ms/batch {:5.2f} | '
                   'loss {:5.2f} | ppl {:8.2f} | bpc {:8.3f}'.format(
                 epoch, batch, len(train_data) // args.bptt,
                 elapsed * 1000 / args.log_interval, cur_loss,
                 math.exp(cur_loss), cur_loss / math.log(2)))
-            total_loss = 0
+            total_loss.reset()
             start_time = time.time()
 
-        # if batch % 1000 == 0 and batch > 0:
         if batch % 10000 == 0 and batch > 0:
             break
+
+    return total_loss.avg
 
 # Loop over epochs.
 best_val_loss = None
 optimizer = optim.SGD(model.parameters(), args.lr, args.momentum)
 
+num_params = 0
+for p in model.parameters():
+    num_params += p.numel()
+
+print('Number of parameters: {}'.format(num_params))
+
 # At any point you can hit Ctrl + C to break out of training early.
 try:
     for epoch in range(1, args.epochs + 1):
         epoch_start_time = time.time()
-        train()
+        train_loss = train()
+        print('| end of epoch {:3d} | time: {:5.2f}s | train loss {:5.2f} | '
+              'train ppl {:8.2f} | train bpc {:8.3f}'.format(epoch, (time.time() - epoch_start_time),
+                                         train_loss, math.exp(train_loss), train_loss / math.log(2)))
         val_loss = evaluate(val_data)
         print('-' * 89)
         print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
