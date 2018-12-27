@@ -194,7 +194,7 @@ def evaluate(data_source):
             data, target, data_mask, target_mask = get_batch(data_source, i, train=False)
             output = model(data, target_mask)
             _, last_loss = model.criterion(output, target)
-            total_loss.update(last_loss.item(), 1)
+            total_loss.update(last_loss.item(), data.size(0))
     return total_loss.avg
 
 

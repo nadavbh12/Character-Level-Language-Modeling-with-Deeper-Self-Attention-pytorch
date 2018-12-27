@@ -5,7 +5,7 @@ class EncoderLayer(nn.Module):
     """Encoder is made up of self-attn and feed forward (defined below)"""
 
     def __init__(self, size, self_attn, feed_forward, dropout,
-                 intermediate_layer_predictions=True, generator=None, max_sequence_len=512):
+                 intermediate_layer_predictions=True, generator=None, max_sequence_len=512, force_prediction=False):
         super(EncoderLayer, self).__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
@@ -15,6 +15,7 @@ class EncoderLayer(nn.Module):
 
         self.size = size
         self.intermediate_layer_predictions = intermediate_layer_predictions
+        self.force_prediction = force_prediction
         if intermediate_layer_predictions and self.training:
             self.classifier = copy.deepcopy(generator)
 
@@ -22,7 +23,7 @@ class EncoderLayer(nn.Module):
         x = self.add_positional_encoding(x)
         x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, mask))
         x = self.sublayer[1](x, self.feed_forward)
-        if self.intermediate_layer_predictions and self.training:
+        if self.force_prediction or (self.intermediate_layer_predictions and self.training):
             return x, self.classifier(self.norm(x))
         else:
             return x, None
@@ -34,6 +35,8 @@ class Encoder(nn.Module):
     def __init__(self, layer, n_layers, intermediate_layer_predictions=True):
         super(Encoder, self).__init__()
         self.layers = clones(layer, n_layers)
+        # enforce a prediction for the last layer
+        self.layers[-1].force_prediction = True
         self.norm = LayerNorm(layer.size)
         self.intermediate_layer_predictions = intermediate_layer_predictions
 
@@ -53,7 +56,7 @@ class MultiLayerCrossEntropy(nn.Module):
         self.vocab_size = vocab_size
 
     def forward(self, layer_outputs, target):
-        total_loss = torch.zeros(1, dtype=layer_outputs[0].dtype, device=layer_outputs[0].device)
+        total_loss = torch.zeros(1, dtype=layer_outputs[-1].dtype, device=layer_outputs[-1].device)
         n_layers_with_loss = 0
         for layer_output in layer_outputs:
             if layer_output is not None:
@@ -85,9 +88,9 @@ class NextCharTransformer(nn.Module):
         attn = MultiHeadedAttention(n_heads, hidden_size, dropout)
         ff = PositionwiseFeedForward(hidden_size, inner_linear, dropout)
 
-        self.generator = Generator(hidden_size, vocab_size)
+        generator = Generator(hidden_size, vocab_size)
         self.encoder = Encoder(EncoderLayer(hidden_size, copy.deepcopy(attn), copy.deepcopy(ff),
-                                            dropout, intermediate_layer_predictions, self.generator,
+                                            dropout, intermediate_layer_predictions, generator,
                                             max_sequence_len),
                                n_layers, intermediate_layer_predictions)
         self.embed = Embeddings(hidden_size, vocab_size)
@@ -112,11 +115,7 @@ class NextCharTransformer(nn.Module):
         """Take in and process masked src and target sequences."""
         src_emb = self.embed(src)
         emb, intermediate_predictions = self.encoder(src_emb, mask)
-        if self.intermediate_layer_predictions and self.training:
-            return intermediate_predictions
-        else:
-            prediction = self.generator(emb)
-            return [prediction]
+        return intermediate_predictions
 
     def update(self, training_percent):
         """Stop using losses from intermediate layer as function of time in training.
