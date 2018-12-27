@@ -11,7 +11,7 @@ import torch.optim as optim
 import torch.onnx
 
 import data
-from transformer_model2 import next_char_transformer
+from transformer_model import next_char_transformer
 
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='./data/wikitext-2',
