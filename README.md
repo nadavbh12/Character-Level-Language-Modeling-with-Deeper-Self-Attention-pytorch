@@ -3,7 +3,6 @@ Reproducing [Character-Level-Language-Modeling with Deeper Self-Attention](https
 
 ## TODO:
 - [ ] Implement multiple targets.
-- [ ] Fix calculation of validation loss.
 - [ ] Compare results to those reported in paper.
 
 
